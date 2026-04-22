@@ -13,6 +13,16 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  // Surface missing-token failures loudly instead of letting them bubble up as
+  // the vague "Failed to retrieve the client token" error on the client.
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    console.error('[upload] BLOB_READ_WRITE_TOKEN is missing on this deployment');
+    return res.status(500).json({
+      error:
+        'BLOB_READ_WRITE_TOKEN ไม่ถูกตั้ง — ไปที่ Vercel project → Storage → Create Blob store แล้วกด Redeploy',
+    });
+  }
+
   try {
     const jsonResponse = await handleUpload({
       body: req.body,
@@ -20,21 +30,19 @@ export default async function handler(req, res) {
       onBeforeGenerateToken: async (pathname) => {
         console.log('[upload] token request for:', pathname);
         return {
-          // Do not restrict by content type — m4a files can arrive as audio/mp4,
-          // audio/x-m4a, audio/aac, or application/octet-stream depending on the
-          // browser. We validate by file extension on the client instead.
           allowedContentTypes: undefined,
-          maximumSizeInBytes: 25 * 1024 * 1024, // 25 MB (OpenAI Whisper limit)
+          maximumSizeInBytes: 25 * 1024 * 1024,
           addRandomSuffix: true,
         };
       },
       onUploadCompleted: async ({ blob }) => {
-        console.log('[upload] completed:', blob.url);
+        console.log('[upload] webhook completed:', blob.url);
       },
     });
+    console.log('[upload] returning response to client');
     return res.status(200).json(jsonResponse);
   } catch (err) {
-    console.error('[upload] error:', err);
-    return res.status(400).json({ error: err.message ?? 'Upload failed' });
+    console.error('[upload] handleUpload error:', err?.message, err?.stack);
+    return res.status(400).json({ error: err?.message ?? 'Upload handler failed' });
   }
 }
