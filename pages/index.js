@@ -91,7 +91,8 @@ export default function Home() {
         const uploadPromise = upload(file.name, file, {
           access: 'public',
           handleUploadUrl: '/api/upload',
-          multipart: true, // required for files larger than ~5 MB
+          // multipart disabled: simpler single PUT, more compatible with strict networks.
+          // If this hangs, check browser Network tab for a PUT to blob.vercel-storage.com.
           onUploadProgress: (evt) => {
             lastProgressTime = Date.now();
             if (evt.percentage != null) {
