@@ -1,12 +1,19 @@
-import { generateClientTokenFromReadWriteToken } from '@vercel/blob/client';
+import { handleUpload } from '@vercel/blob/client';
+
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '1mb',
+    },
+  },
+};
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const serverToken = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!serverToken) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
     console.error('[upload] BLOB_READ_WRITE_TOKEN missing');
     return res.status(500).json({
       error:
@@ -14,28 +21,32 @@ export default async function handler(req, res) {
     });
   }
 
-  const { pathname } = req.body ?? {};
-  if (!pathname || typeof pathname !== 'string') {
-    return res.status(400).json({ error: 'Missing "pathname" in request body.' });
-  }
-
   try {
-    // Generate a short-lived client token that authorizes ONE upload of this file.
-    // This bypasses handleUpload's webhook flow, which fails when the deployment
-    // is behind any kind of authentication (Preview URLs on free tier, SSO, etc.).
-    const clientToken = await generateClientTokenFromReadWriteToken({
-      token: serverToken,
-      pathname,
-      onUploadCompleted: undefined, // no webhook — client tells us when it's done
-      addRandomSuffix: true,
-      maximumSizeInBytes: 25 * 1024 * 1024, // 25 MB (OpenAI Whisper limit)
-      validUntil: Date.now() + 10 * 60 * 1000, // 10 minutes
+    const jsonResponse = await handleUpload({
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+      body: req.body,
+      request: req,
+      onBeforeGenerateToken: async (pathname) => {
+        console.log('[upload] token request for:', pathname);
+        return {
+          allowedContentTypes: undefined,
+          maximumSizeInBytes: 25 * 1024 * 1024,
+          addRandomSuffix: true,
+        };
+      },
+      onUploadCompleted: async ({ blob }) => {
+        // NOTE: This webhook is called by the Vercel Blob service. It MUST be
+        // publicly reachable — if the deployment is behind Vercel Deployment
+        // Protection (enabled by default on Preview URLs for some plans), this
+        // webhook returns 401 and the client's upload() promise hangs.
+        // Fix: disable Deployment Protection, OR use the Production URL.
+        console.log('[upload] webhook completed:', blob.url);
+      },
     });
-
-    console.log('[upload] issued client token for:', pathname);
-    return res.status(200).json({ clientToken });
+    console.log('[upload] returning response to client');
+    return res.status(200).json(jsonResponse);
   } catch (err) {
-    console.error('[upload] token error:', err?.message, err?.stack);
-    return res.status(500).json({ error: err?.message ?? 'Failed to generate upload token' });
+    console.error('[upload] handleUpload error:', err?.message, err?.stack);
+    return res.status(400).json({ error: err?.message ?? 'Upload handler failed' });
   }
 }

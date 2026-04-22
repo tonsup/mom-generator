@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import Head from 'next/head';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { put } from '@vercel/blob';
+import { upload } from '@vercel/blob/client';
 
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
@@ -87,25 +87,12 @@ export default function Home() {
           ),
         );
 
-        // Step 1 — get a one-time upload token from our server
-        const tokenResp = await fetch('/api/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pathname: file.name }),
-        });
-        if (!tokenResp.ok) {
-          const errJson = await tokenResp.json().catch(() => ({}));
-          throw new Error(errJson.error || `Token request failed (HTTP ${tokenResp.status})`);
-        }
-        const { clientToken } = await tokenResp.json();
-        console.log('[client] got upload token, starting PUT to Vercel Blob');
-
-        // Step 2 — upload file DIRECTLY from browser to Vercel Blob with the token.
-        // No webhook required, so this works even behind Deployment Protection.
-        const uploadPromise = put(file.name, file, {
+        // Upload directly from browser to Vercel Blob.
+        // Uses the handleUpload webhook flow, which requires the deployment to be
+        // publicly accessible (no Deployment Protection, or use the Production URL).
+        const uploadPromise = upload(file.name, file, {
           access: 'public',
-          token: clientToken,
-          contentType: file.type || 'application/octet-stream',
+          handleUploadUrl: '/api/upload',
           onUploadProgress: (evt) => {
             lastProgressTime = Date.now();
             if (evt.percentage != null) {
