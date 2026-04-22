@@ -99,7 +99,11 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'OpenAI SDK exports missing' });
     }
 
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const client = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      timeout: 55 * 1000, // 55s — fit within maxDuration:60
+      maxRetries: 2,
+    });
     const whisperFile = await toFile(audioBuffer, 'audio.mp3', { type: 'audio/mpeg' });
 
     console.log(`[transcribe] calling Whisper for chunk ${chunkIndex}`);
