@@ -65,26 +65,6 @@ export default function Home() {
     setUploadPercent(0);
 
     try {
-      // Pre-flight: verify the upload endpoint can mint a token (catches missing BLOB_READ_WRITE_TOKEN)
-      const ping = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'blob.generate-client-token',
-          payload: { pathname: file.name, callbackUrl: '' },
-        }),
-      });
-      if (!ping.ok) {
-        const txt = await ping.text();
-        let msg = txt;
-        try { msg = JSON.parse(txt).error || txt; } catch {}
-        if (/BLOB_READ_WRITE_TOKEN|No token found/i.test(msg)) {
-          throw new Error(
-            'ยังไม่ได้สร้าง Vercel Blob store — ไปที่ Vercel Dashboard > Storage > Create Database > Blob แล้ว Redeploy'
-          );
-        }
-      }
-
       // Step 1 — upload directly from browser to Vercel Blob (bypasses 4.5 MB function limit)
       const blob = await upload(file.name, file, {
         access: 'public',
