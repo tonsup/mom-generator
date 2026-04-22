@@ -22,6 +22,7 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
+  const [uploadPercent, setUploadPercent] = useState(0);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -61,12 +62,36 @@ export default function Home() {
     setError(null);
     setResult(null);
     setCurrentStep(1);
+    setUploadPercent(0);
 
     try {
+      // Pre-flight: verify the upload endpoint can mint a token (catches missing BLOB_READ_WRITE_TOKEN)
+      const ping = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'blob.generate-client-token',
+          payload: { pathname: file.name, callbackUrl: '' },
+        }),
+      });
+      if (!ping.ok) {
+        const txt = await ping.text();
+        let msg = txt;
+        try { msg = JSON.parse(txt).error || txt; } catch {}
+        if (/BLOB_READ_WRITE_TOKEN|No token found/i.test(msg)) {
+          throw new Error(
+            'ยังไม่ได้สร้าง Vercel Blob store — ไปที่ Vercel Dashboard > Storage > Create Database > Blob แล้ว Redeploy'
+          );
+        }
+      }
+
       // Step 1 — upload directly from browser to Vercel Blob (bypasses 4.5 MB function limit)
       const blob = await upload(file.name, file, {
         access: 'public',
         handleUploadUrl: '/api/upload',
+        onUploadProgress: (evt) => {
+          if (evt.percentage != null) setUploadPercent(Math.round(evt.percentage));
+        },
       });
 
       setCurrentStep(2);
@@ -92,6 +117,7 @@ export default function Home() {
     } finally {
       setProcessing(false);
       setCurrentStep(0);
+      setUploadPercent(0);
     }
   };
 
@@ -247,13 +273,24 @@ export default function Home() {
                           >
                             {done ? '✓' : step.id}
                           </div>
-                          <div>
+                          <div className="flex-1">
                             <p className={`font-medium transition-colors ${done || active ? 'text-white' : 'text-white/30'}`}>
                               {step.th}
+                              {active && step.id === 1 && uploadPercent > 0 && (
+                                <span className="ml-2 text-blue-300">{uploadPercent}%</span>
+                              )}
                             </p>
                             <p className={`text-xs transition-colors ${done || active ? 'text-blue-300' : 'text-white/20'}`}>
                               {step.en}
                             </p>
+                            {active && step.id === 1 && (
+                              <div className="mt-2 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-blue-500 transition-all duration-200"
+                                  style={{ width: `${uploadPercent}%` }}
+                                />
+                              </div>
+                            )}
                           </div>
                         </div>
                       );
