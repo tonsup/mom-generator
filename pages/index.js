@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import Head from 'next/head';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { upload } from '@vercel/blob/client';
+import { put } from '@vercel/blob';
 
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
@@ -87,12 +87,25 @@ export default function Home() {
           ),
         );
 
-        // Step 1 — upload directly from browser to Vercel Blob (bypasses 4.5 MB function limit)
-        const uploadPromise = upload(file.name, file, {
+        // Step 1 — get a one-time upload token from our server
+        const tokenResp = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pathname: file.name }),
+        });
+        if (!tokenResp.ok) {
+          const errJson = await tokenResp.json().catch(() => ({}));
+          throw new Error(errJson.error || `Token request failed (HTTP ${tokenResp.status})`);
+        }
+        const { clientToken } = await tokenResp.json();
+        console.log('[client] got upload token, starting PUT to Vercel Blob');
+
+        // Step 2 — upload file DIRECTLY from browser to Vercel Blob with the token.
+        // No webhook required, so this works even behind Deployment Protection.
+        const uploadPromise = put(file.name, file, {
           access: 'public',
-          handleUploadUrl: '/api/upload',
-          // multipart disabled: simpler single PUT, more compatible with strict networks.
-          // If this hangs, check browser Network tab for a PUT to blob.vercel-storage.com.
+          token: clientToken,
+          contentType: file.type || 'application/octet-stream',
           onUploadProgress: (evt) => {
             lastProgressTime = Date.now();
             if (evt.percentage != null) {

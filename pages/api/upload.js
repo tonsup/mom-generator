@@ -1,52 +1,41 @@
-import { handleUpload } from '@vercel/blob/client';
-
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '1mb', // only JSON metadata passes through this route
-    },
-  },
-};
+import { generateClientTokenFromReadWriteToken } from '@vercel/blob/client';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Surface missing-token failures loudly instead of letting them bubble up as
-  // the vague "Failed to retrieve the client token" error on the client.
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) {
-    console.error('[upload] BLOB_READ_WRITE_TOKEN is missing on this deployment');
-    console.error('[upload] available env keys containing BLOB:',
-      Object.keys(process.env).filter((k) => k.includes('BLOB')));
+  const serverToken = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!serverToken) {
+    console.error('[upload] BLOB_READ_WRITE_TOKEN missing');
     return res.status(500).json({
       error:
-        'BLOB_READ_WRITE_TOKEN ไม่ถูกตั้ง — ไปที่ Vercel project → Storage → Create Blob store แล้วกด Redeploy',
+        'BLOB_READ_WRITE_TOKEN ไม่ถูกตั้ง — ไปที่ Vercel project → Storage → Create Blob store แล้ว Redeploy',
     });
   }
 
+  const { pathname } = req.body ?? {};
+  if (!pathname || typeof pathname !== 'string') {
+    return res.status(400).json({ error: 'Missing "pathname" in request body.' });
+  }
+
   try {
-    const jsonResponse = await handleUpload({
-      token, // pass explicitly instead of relying on auto env lookup
-      body: req.body,
-      request: req,
-      onBeforeGenerateToken: async (pathname) => {
-        console.log('[upload] token request for:', pathname);
-        return {
-          allowedContentTypes: undefined,
-          maximumSizeInBytes: 25 * 1024 * 1024,
-          addRandomSuffix: true,
-        };
-      },
-      onUploadCompleted: async ({ blob }) => {
-        console.log('[upload] webhook completed:', blob.url);
-      },
+    // Generate a short-lived client token that authorizes ONE upload of this file.
+    // This bypasses handleUpload's webhook flow, which fails when the deployment
+    // is behind any kind of authentication (Preview URLs on free tier, SSO, etc.).
+    const clientToken = await generateClientTokenFromReadWriteToken({
+      token: serverToken,
+      pathname,
+      onUploadCompleted: undefined, // no webhook — client tells us when it's done
+      addRandomSuffix: true,
+      maximumSizeInBytes: 25 * 1024 * 1024, // 25 MB (OpenAI Whisper limit)
+      validUntil: Date.now() + 10 * 60 * 1000, // 10 minutes
     });
-    console.log('[upload] returning response to client');
-    return res.status(200).json(jsonResponse);
+
+    console.log('[upload] issued client token for:', pathname);
+    return res.status(200).json({ clientToken });
   } catch (err) {
-    console.error('[upload] handleUpload error:', err?.message, err?.stack);
-    return res.status(400).json({ error: err?.message ?? 'Upload handler failed' });
+    console.error('[upload] token error:', err?.message, err?.stack);
+    return res.status(500).json({ error: err?.message ?? 'Failed to generate upload token' });
   }
 }
