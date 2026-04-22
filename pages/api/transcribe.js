@@ -120,6 +120,16 @@ export default async function handler(req, res) {
     return res.status(200).json({ text, language });
   } catch (err) {
     console.error('[transcribe] error:', err?.stack || err?.message || err);
-    return res.status(500).json({ error: err?.message || 'Transcription failed' });
+    // Map OpenAI errors to clearer status codes
+    const msg = err?.message || 'Transcription failed';
+    if (/429|quota|billing/i.test(msg)) {
+      return res.status(402).json({
+        error: 'OpenAI quota/billing limit reached — เติมเครดิต OpenAI แล้วลองใหม่ / Top up OpenAI credits and retry',
+      });
+    }
+    if (/401|invalid.*api.*key/i.test(msg)) {
+      return res.status(401).json({ error: 'OpenAI API key invalid / API key ไม่ถูกต้อง' });
+    }
+    return res.status(500).json({ error: msg });
   }
 }

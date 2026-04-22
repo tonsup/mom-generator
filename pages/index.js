@@ -151,6 +151,11 @@ export default function Home() {
             fd.append('chunkIndex', String(i));
 
             const tResp = await fetch('/api/transcribe', { method: 'POST', body: fd });
+            // Don't retry auth/billing errors — fix the underlying problem first
+            if (tResp.status === 401 || tResp.status === 402) {
+              tData = await readJsonOrThrow(tResp, `Transcription failed on chunk ${i + 1}/${chunks.length}`);
+              break;
+            }
             if (tResp.status === 502 || tResp.status === 503 || tResp.status === 504) {
               lastErr = new Error(`HTTP ${tResp.status}`);
               console.warn(`[client] chunk ${i + 1} attempt ${attempt}: ${lastErr.message}`);
