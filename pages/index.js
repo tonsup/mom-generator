@@ -65,16 +65,48 @@ export default function Home() {
     setUploadPercent(0);
 
     try {
-      // Step 1 — upload directly from browser to Vercel Blob (bypasses 4.5 MB function limit)
-      const blob = await upload(file.name, file, {
-        access: 'public',
-        handleUploadUrl: '/api/upload',
-        multipart: true, // required for files larger than ~5 MB
-        onUploadProgress: (evt) => {
-          if (evt.percentage != null) setUploadPercent(Math.round(evt.percentage));
-        },
-      });
+      console.log('[client] starting upload:', file.name, file.size, 'bytes, type:', file.type);
+      const uploadStart = Date.now();
 
+      // Progress watchdog — if no progress for 30 seconds, something is wrong
+      let lastProgressTime = Date.now();
+      const watchdog = setInterval(() => {
+        const stalledSec = Math.round((Date.now() - lastProgressTime) / 1000);
+        if (stalledSec >= 30) {
+          console.warn('[client] no upload progress for', stalledSec, 'seconds');
+        }
+      }, 5000);
+
+      let blob;
+      try {
+        // Hard timeout: if upload doesn't finish within 3 minutes, abort and surface an error
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Upload timed out after 3 minutes. Check browser Network tab — the upload may be blocked or retrying silently.')),
+            3 * 60 * 1000,
+          ),
+        );
+
+        // Step 1 — upload directly from browser to Vercel Blob (bypasses 4.5 MB function limit)
+        const uploadPromise = upload(file.name, file, {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          multipart: true, // required for files larger than ~5 MB
+          onUploadProgress: (evt) => {
+            lastProgressTime = Date.now();
+            if (evt.percentage != null) {
+              setUploadPercent(Math.round(evt.percentage));
+              console.log('[client] upload progress:', Math.round(evt.percentage) + '%');
+            }
+          },
+        });
+
+        blob = await Promise.race([uploadPromise, timeoutPromise]);
+      } finally {
+        clearInterval(watchdog);
+      }
+
+      console.log('[client] upload completed in', Math.round((Date.now() - uploadStart) / 1000), 'sec →', blob.url);
       setCurrentStep(2);
 
       // Step 2 & 3 — server fetches blob, transcribes, summarizes
