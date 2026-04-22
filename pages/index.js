@@ -25,6 +25,35 @@ async function readJsonOrThrow(response, context) {
   }
 }
 
+// Retry a fetch on transient network failures (Failed to fetch, ERR_NETWORK_CHANGED, etc.)
+// and transient server errors (502, 503, 504).
+async function fetchWithRetry(url, init, context, maxAttempts = 4) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = await fetch(url, init);
+      // Retry on transient 5xx (but not 500 — that's a real server bug we want to see)
+      if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+        lastErr = new Error(`${context}: HTTP ${resp.status} (attempt ${attempt}/${maxAttempts})`);
+        console.warn('[client]', lastErr.message);
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+          continue;
+        }
+      }
+      return resp;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[client] ${context} network error (attempt ${attempt}/${maxAttempts}):`, err.message);
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        continue;
+      }
+    }
+  }
+  throw new Error(`${context} — ล้มเหลวหลัง ${maxAttempts} ครั้ง: ${lastErr?.message || 'network error'}`);
+}
+
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
 const STEPS = [
@@ -110,12 +139,41 @@ export default function Home() {
 
       for (let i = 0; i < chunks.length; i++) {
         console.log(`[client] transcribing chunk ${i + 1}/${chunks.length} (${(chunks[i].size / 1024 / 1024).toFixed(2)} MB)`);
-        const formData = new FormData();
-        formData.append('audio', chunks[i], `chunk-${i}.mp3`);
-        formData.append('chunkIndex', String(i));
 
-        const tResp = await fetch('/api/transcribe', { method: 'POST', body: formData });
-        const tData = await readJsonOrThrow(tResp, `Transcription failed on chunk ${i + 1}/${chunks.length}`);
+        // Retry network failures: FormData can only be read once, so rebuild it each attempt
+        let tData = null;
+        let lastErr = null;
+        const maxAttempts = 4;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            const fd = new FormData();
+            fd.append('audio', chunks[i], `chunk-${i}.mp3`);
+            fd.append('chunkIndex', String(i));
+
+            const tResp = await fetch('/api/transcribe', { method: 'POST', body: fd });
+            if (tResp.status === 502 || tResp.status === 503 || tResp.status === 504) {
+              lastErr = new Error(`HTTP ${tResp.status}`);
+              console.warn(`[client] chunk ${i + 1} attempt ${attempt}: ${lastErr.message}`);
+              if (attempt < maxAttempts) {
+                await new Promise((r) => setTimeout(r, 1500 * attempt));
+                continue;
+              }
+            }
+            tData = await readJsonOrThrow(tResp, `Transcription failed on chunk ${i + 1}/${chunks.length}`);
+            break;
+          } catch (err) {
+            lastErr = err;
+            // Only retry on network errors, not on real server errors surfaced by readJsonOrThrow
+            const isNetwork = err.message === 'Failed to fetch' || /network|ERR_NETWORK/i.test(err.message);
+            console.warn(`[client] chunk ${i + 1} attempt ${attempt} error:`, err.message);
+            if (isNetwork && attempt < maxAttempts) {
+              await new Promise((r) => setTimeout(r, 1500 * attempt));
+              continue;
+            }
+            throw err;
+          }
+        }
+        if (!tData) throw lastErr || new Error(`Chunk ${i + 1} failed`);
 
         transcripts.push(tData.text || '');
         if (i === 0 && tData.language) detectedLanguage = tData.language;
@@ -132,11 +190,15 @@ export default function Home() {
       setUploadPercent(0);
 
       // Step 3 — Generate MOM from joined transcript
-      const mResp = await fetch('/api/generate-mom', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: fullTranscript, language: detectedLanguage }),
-      });
+      const mResp = await fetchWithRetry(
+        '/api/generate-mom',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transcript: fullTranscript, language: detectedLanguage }),
+        },
+        'MOM generation',
+      );
       const data = await readJsonOrThrow(mResp, 'MOM generation failed');
 
       console.log(`[client] all done in ${Math.round((Date.now() - startTime) / 1000)}s`);
