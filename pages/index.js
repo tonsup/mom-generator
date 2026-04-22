@@ -4,6 +4,27 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { compressAudioForWhisper } from '../lib/compressAudio';
 
+// Parse a fetch response that we *expect* to be JSON. If the server returned HTML
+// (Vercel error page, 413, 504, etc.), surface a helpful message instead of the
+// cryptic "Unexpected token '<'" JSON parse error.
+async function readJsonOrThrow(response, context) {
+  const text = await response.text();
+  try {
+    const data = JSON.parse(text);
+    if (!response.ok) {
+      throw new Error(data.error || `${context} failed (HTTP ${response.status})`);
+    }
+    return data;
+  } catch (parseErr) {
+    if (parseErr.message.startsWith(context)) throw parseErr;
+    const snippet = text.slice(0, 200).replace(/<[^>]+>/g, '').trim() || '(empty body)';
+    throw new Error(
+      `${context} — เซิร์ฟเวอร์ตอบกลับแบบไม่ใช่ JSON (HTTP ${response.status}). ` +
+      `Server returned non-JSON (HTTP ${response.status}): ${snippet}`,
+    );
+  }
+}
+
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
 const STEPS = [
@@ -94,8 +115,7 @@ export default function Home() {
         formData.append('chunkIndex', String(i));
 
         const tResp = await fetch('/api/transcribe', { method: 'POST', body: formData });
-        const tData = await tResp.json();
-        if (!tResp.ok) throw new Error(tData.error || `Transcription failed on chunk ${i + 1}`);
+        const tData = await readJsonOrThrow(tResp, `Transcription failed on chunk ${i + 1}/${chunks.length}`);
 
         transcripts.push(tData.text || '');
         if (i === 0 && tData.language) detectedLanguage = tData.language;
@@ -117,8 +137,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript: fullTranscript, language: detectedLanguage }),
       });
-      const data = await mResp.json();
-      if (!mResp.ok) throw new Error(data.error || 'การประมวลผลล้มเหลว / Processing failed');
+      const data = await readJsonOrThrow(mResp, 'MOM generation failed');
 
       console.log(`[client] all done in ${Math.round((Date.now() - startTime) / 1000)}s`);
       setResult(data);
