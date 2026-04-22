@@ -21,3 +21,15 @@ yarn-error.log*
 
 # Vercel
 .vercel
+
+# Audio / media files — do not commit recordings
+*.m4a
+*.mp3
+*.mp4
+*.wav
+*.webm
+*.mpeg
+*.mpga
+*.aac
+*.ogg
+*.flac
