@@ -1,4 +1,4 @@
-import OpenAI from 'openai';
+import OpenAI, { toFile } from 'openai';
 import formidable from 'formidable';
 import fs from 'fs';
 
@@ -35,10 +35,17 @@ export default async function handler(req, res) {
     tempPath = audioFile.filepath;
 
     const chunkIndex = Array.isArray(fields.chunkIndex) ? fields.chunkIndex[0] : fields.chunkIndex;
-    console.log(`[transcribe] chunk ${chunkIndex}: ${audioFile.size} bytes`);
+    console.log(`[transcribe] chunk ${chunkIndex}: ${audioFile.size} bytes, tempPath=${tempPath}`);
+
+    // Wrap the file so OpenAI SDK sends an explicit filename+mimetype. Without this,
+    // formidable's temp path (no extension) makes the SDK send an ambiguous upload
+    // and Whisper rejects it, causing the function to throw.
+    const whisperFile = await toFile(fs.createReadStream(tempPath), 'audio.mp3', {
+      type: 'audio/mpeg',
+    });
 
     const transcription = await client.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
+      file: whisperFile,
       model: 'whisper-1',
       response_format: 'verbose_json',
     });
