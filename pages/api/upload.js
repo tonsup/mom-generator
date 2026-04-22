@@ -15,8 +15,11 @@ export default async function handler(req, res) {
 
   // Surface missing-token failures loudly instead of letting them bubble up as
   // the vague "Failed to retrieve the client token" error on the client.
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) {
     console.error('[upload] BLOB_READ_WRITE_TOKEN is missing on this deployment');
+    console.error('[upload] available env keys containing BLOB:',
+      Object.keys(process.env).filter((k) => k.includes('BLOB')));
     return res.status(500).json({
       error:
         'BLOB_READ_WRITE_TOKEN ไม่ถูกตั้ง — ไปที่ Vercel project → Storage → Create Blob store แล้วกด Redeploy',
@@ -25,6 +28,7 @@ export default async function handler(req, res) {
 
   try {
     const jsonResponse = await handleUpload({
+      token, // pass explicitly instead of relying on auto env lookup
       body: req.body,
       request: req,
       onBeforeGenerateToken: async (pathname) => {
