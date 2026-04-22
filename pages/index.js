@@ -69,6 +69,7 @@ export default function Home() {
       const blob = await upload(file.name, file, {
         access: 'public',
         handleUploadUrl: '/api/upload',
+        multipart: true, // required for files larger than ~5 MB
         onUploadProgress: (evt) => {
           if (evt.percentage != null) setUploadPercent(Math.round(evt.percentage));
         },
