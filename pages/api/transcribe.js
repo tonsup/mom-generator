@@ -1,4 +1,3 @@
-import OpenAI, { toFile } from 'openai';
 import { Buffer } from 'node:buffer';
 
 export const config = {
@@ -6,10 +5,6 @@ export const config = {
   maxDuration: 60,
 };
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// Read the raw request body as a Buffer. Avoids formidable, which has been
-// flaky on Vercel serverless in this project.
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -27,8 +22,6 @@ function readRawBody(req) {
   });
 }
 
-// Minimal multipart parser — handles our two fields: `audio` (binary) and
-// `chunkIndex` (text). Good enough since the client is ours.
 function parseMultipart(buffer, boundary) {
   const delimiter = Buffer.from(`--${boundary}`);
   const parts = [];
@@ -38,8 +31,8 @@ function parseMultipart(buffer, boundary) {
     if (start === -1) break;
     const end = buffer.indexOf(delimiter, start + delimiter.length);
     if (end === -1) break;
-    const partStart = start + delimiter.length + 2; // skip CRLF
-    const partEnd = end - 2; // strip trailing CRLF
+    const partStart = start + delimiter.length + 2;
+    const partEnd = end - 2;
     if (partEnd > partStart) parts.push(buffer.slice(partStart, partEnd));
     cursor = end;
   }
@@ -47,7 +40,6 @@ function parseMultipart(buffer, boundary) {
   const fields = {};
   let audioBuffer = null;
   const headerSep = Buffer.from('\r\n\r\n');
-
   for (const part of parts) {
     const headerEnd = part.indexOf(headerSep);
     if (headerEnd === -1) continue;
@@ -66,11 +58,18 @@ function parseMultipart(buffer, boundary) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  console.log('[transcribe] handler entered');
 
   try {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('[transcribe] OPENAI_API_KEY is not set');
+      return res.status(500).json({ error: 'Server misconfigured: OPENAI_API_KEY missing' });
+    }
+
     const contentType = req.headers['content-type'] || '';
     const boundaryMatch = /boundary=(.+)$/.exec(contentType);
     if (!boundaryMatch) {
@@ -78,7 +77,7 @@ export default async function handler(req, res) {
     }
     const boundary = boundaryMatch[1];
 
-    console.log('[transcribe] reading body, content-length:', req.headers['content-length']);
+    console.log('[transcribe] content-length:', req.headers['content-length']);
     const body = await readRawBody(req);
     console.log('[transcribe] body size:', body.length);
 
@@ -90,8 +89,20 @@ export default async function handler(req, res) {
     const chunkIndex = fields.chunkIndex || '?';
     console.log(`[transcribe] chunk ${chunkIndex}: audio ${audioBuffer.length} bytes`);
 
+    // Lazy-import OpenAI so any loader error is caught here rather than crashing
+    // the module at init time (which would produce an empty 500 from Vercel).
+    const openaiMod = await import('openai');
+    const OpenAI = openaiMod.default || openaiMod.OpenAI;
+    const toFile = openaiMod.toFile;
+    if (!OpenAI || !toFile) {
+      console.error('[transcribe] openai module missing exports', Object.keys(openaiMod));
+      return res.status(500).json({ error: 'OpenAI SDK exports missing' });
+    }
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const whisperFile = await toFile(audioBuffer, 'audio.mp3', { type: 'audio/mpeg' });
 
+    console.log(`[transcribe] calling Whisper for chunk ${chunkIndex}`);
     const transcription = await client.audio.transcriptions.create({
       file: whisperFile,
       model: 'whisper-1',
@@ -104,7 +115,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ text, language });
   } catch (err) {
-    console.error('[transcribe] error:', err?.stack || err);
+    console.error('[transcribe] error:', err?.stack || err?.message || err);
     return res.status(500).json({ error: err?.message || 'Transcription failed' });
   }
 }
