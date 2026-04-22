@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import Head from 'next/head';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { upload } from '@vercel/blob/client';
 
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
@@ -61,14 +62,20 @@ export default function Home() {
     setResult(null);
     setCurrentStep(1);
 
-    const formData = new FormData();
-    formData.append('audio', file);
-
     try {
+      // Step 1 — upload directly from browser to Vercel Blob (bypasses 4.5 MB function limit)
+      const blob = await upload(file.name, file, {
+        access: 'public',
+        handleUploadUrl: '/api/upload',
+      });
+
       setCurrentStep(2);
+
+      // Step 2 & 3 — server fetches blob, transcribes, summarizes
       const response = await fetch('/api/process-audio', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blobUrl: blob.url, filename: file.name }),
       });
 
       setCurrentStep(3);

@@ -1,21 +1,15 @@
-import formidable from 'formidable';
-import { createReadStream, unlinkSync } from 'fs';
 import OpenAI from 'openai';
+import { del } from '@vercel/blob';
+import { toFile } from 'openai/uploads';
 
-// Disable Next.js default body parser so formidable can handle multipart
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: {
+      sizeLimit: '1mb',
+    },
   },
   maxDuration: 60,
 };
-
-const ALLOWED_EXTENSIONS = new Set(['.m4a', '.mp3', '.mp4', '.wav', '.webm', '.mpeg', '.mpga']);
-
-function getExtension(filename = '') {
-  const parts = filename.toLowerCase().split('.');
-  return parts.length > 1 ? `.${parts[parts.length - 1]}` : '';
-}
 
 function buildPrompt(isThai, transcript) {
   if (isThai) {
@@ -61,42 +55,26 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'OpenAI API key is not configured on the server.' });
   }
 
+  const { blobUrl, filename } = req.body ?? {};
+
+  if (!blobUrl) {
+    return res.status(400).json({ error: 'Missing blobUrl in request body.' });
+  }
+
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  const form = formidable({
-    maxFileSize: 25 * 1024 * 1024, // 25 MB (OpenAI Whisper hard limit)
-    keepExtensions: true,
-    filter: ({ originalFilename }) => {
-      const ext = getExtension(originalFilename);
-      return ALLOWED_EXTENSIONS.has(ext);
-    },
-  });
-
-  let audioFilePath = null;
-
   try {
-    const [, files] = await form.parse(req);
-    const audioFile = files.audio?.[0];
-
-    if (!audioFile) {
-      return res.status(400).json({
-        error: 'ไม่พบไฟล์เสียง / No audio file received. Make sure the field name is "audio".',
-      });
+    // ── Step 1: Fetch audio from Vercel Blob ───────────────────────────────
+    const audioResponse = await fetch(blobUrl);
+    if (!audioResponse.ok) {
+      throw new Error(`Failed to fetch uploaded audio (HTTP ${audioResponse.status})`);
     }
+    const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
 
-    // Validate extension
-    const ext = getExtension(audioFile.originalFilename ?? '');
-    if (!ALLOWED_EXTENSIONS.has(ext)) {
-      return res.status(422).json({
-        error: `ไม่รองรับนามสกุลไฟล์ "${ext}" / Unsupported file type "${ext}".`,
-      });
-    }
-
-    audioFilePath = audioFile.filepath;
-
-    // ── Step 1: Transcribe with Whisper ────────────────────────────────────
+    // ── Step 2: Transcribe with Whisper ────────────────────────────────────
+    const file = await toFile(audioBuffer, filename ?? 'audio.m4a');
     const transcriptionResponse = await openai.audio.transcriptions.create({
-      file: createReadStream(audioFile.filepath),
+      file,
       model: 'whisper-1',
       response_format: 'verbose_json',
     });
@@ -110,8 +88,8 @@ export default async function handler(req, res) {
       });
     }
 
-    // ── Step 2: Generate MOM with GPT-4o ───────────────────────────────────
-    const isThai = detectedLanguage === 'th';
+    // ── Step 3: Generate MOM with GPT-4o ───────────────────────────────────
+    const isThai = detectedLanguage === 'th' || detectedLanguage === 'thai';
     const { system, user } = buildPrompt(isThai, transcript);
 
     const momResponse = await openai.chat.completions.create({
@@ -127,7 +105,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       transcript,
-      language: detectedLanguage,
+      language: isThai ? 'th' : 'en',
       mom: momText,
     });
   } catch (err) {
@@ -139,19 +117,14 @@ export default async function handler(req, res) {
     if (err.status === 429) {
       return res.status(429).json({ error: 'OpenAI rate limit exceeded. Please try again in a moment.' });
     }
-    if (err.code === '1009' || err.message?.includes('maxFileSize')) {
-      return res.status(413).json({ error: 'ไฟล์ใหญ่เกิน 25 MB / File exceeds 25 MB limit.' });
-    }
 
     return res.status(500).json({ error: err.message ?? 'Internal server error' });
   } finally {
-    // Always clean up the temp file
-    if (audioFilePath) {
-      try {
-        unlinkSync(audioFilePath);
-      } catch {
-        // ignore cleanup errors
-      }
+    // Clean up the blob after processing
+    try {
+      await del(blobUrl);
+    } catch {
+      // ignore cleanup errors
     }
   }
 }
