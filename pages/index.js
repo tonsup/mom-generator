@@ -7,7 +7,7 @@ import { compressAudioForWhisper } from '../lib/compressAudio';
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
 const STEPS = [
-  { id: 1, th: 'บีบอัดเสียง (16 kHz mono)', en: 'Compressing audio (16 kHz mono)' },
+  { id: 1, th: 'บีบอัดเสียง (MP3 16 kHz mono)', en: 'Compressing audio (MP3 16 kHz mono)' },
   { id: 2, th: 'ถอดเสียงเป็นข้อความ (Whisper AI)', en: 'Transcribing audio (Whisper AI)' },
   { id: 3, th: 'สร้างสรุป MOM (GPT-4o)', en: 'Generating MOM summary (GPT-4o)' },
 ];
@@ -68,43 +68,57 @@ export default function Home() {
       console.log('[client] starting:', file.name, file.size, 'bytes, type:', file.type);
       const startTime = Date.now();
 
-      // Step 1 — Compress audio in the browser so the upload fits the 4.5 MB API limit
-      const compressedBlob = await compressAudioForWhisper(file, (percent, label) => {
-        setUploadPercent(percent);
-        console.log(`[client] compress: ${percent}% — ${label}`);
-      });
-
-      const compressedMB = (compressedBlob.size / 1024 / 1024).toFixed(2);
-      const originalMB = (file.size / 1024 / 1024).toFixed(2);
-      console.log(`[client] compressed: ${originalMB} MB → ${compressedMB} MB`);
-
-      if (compressedBlob.size > 4.4 * 1024 * 1024) {
-        throw new Error(
-          `ไฟล์ใหญ่เกินไปแม้หลังบีบอัด (${compressedMB} MB). การประชุมควรสั้นกว่า ~45 นาที / ` +
-          `Compressed file still too large (${compressedMB} MB). Meeting should be under ~45 min.`
-        );
-      }
+      // Step 1 — Compress & split into chunks
+      const { chunks, durationSec, totalSizeMB } = await compressAudioForWhisper(
+        file,
+        (percent, label) => {
+          setUploadPercent(percent);
+          console.log(`[client] compress: ${percent}% — ${label}`);
+        },
+      );
+      console.log(
+        `[client] compressed ${(file.size / 1024 / 1024).toFixed(2)} MB → ${totalSizeMB} MB in ${chunks.length} chunks (duration ${Math.round(durationSec)}s)`,
+      );
 
       setCurrentStep(2);
       setUploadPercent(0);
 
-      // Step 2 & 3 — send compressed WAV directly to API (no Blob storage needed)
-      const formData = new FormData();
-      formData.append('audio', compressedBlob, 'audio.wav');
-      formData.append('originalFilename', file.name);
+      // Step 2 — Transcribe each chunk sequentially
+      const transcripts = [];
+      let detectedLanguage = 'unknown';
 
-      const response = await fetch('/api/process-audio', {
-        method: 'POST',
-        body: formData,
-      });
+      for (let i = 0; i < chunks.length; i++) {
+        console.log(`[client] transcribing chunk ${i + 1}/${chunks.length} (${(chunks[i].size / 1024 / 1024).toFixed(2)} MB)`);
+        const formData = new FormData();
+        formData.append('audio', chunks[i], `chunk-${i}.mp3`);
+        formData.append('chunkIndex', String(i));
+
+        const tResp = await fetch('/api/transcribe', { method: 'POST', body: formData });
+        const tData = await tResp.json();
+        if (!tResp.ok) throw new Error(tData.error || `Transcription failed on chunk ${i + 1}`);
+
+        transcripts.push(tData.text || '');
+        if (i === 0 && tData.language) detectedLanguage = tData.language;
+
+        const pct = Math.round(((i + 1) / chunks.length) * 100);
+        setUploadPercent(pct);
+      }
+
+      const fullTranscript = transcripts.join(' ').trim();
+      if (!fullTranscript) throw new Error('ไม่พบคำพูดในไฟล์เสียง / No speech detected');
+      console.log(`[client] full transcript: ${fullTranscript.length} chars, language=${detectedLanguage}`);
 
       setCurrentStep(3);
+      setUploadPercent(0);
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'การประมวลผลล้มเหลว / Processing failed');
-      }
+      // Step 3 — Generate MOM from joined transcript
+      const mResp = await fetch('/api/generate-mom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: fullTranscript, language: detectedLanguage }),
+      });
+      const data = await mResp.json();
+      if (!mResp.ok) throw new Error(data.error || 'การประมวลผลล้มเหลว / Processing failed');
 
       console.log(`[client] all done in ${Math.round((Date.now() - startTime) / 1000)}s`);
       setResult(data);

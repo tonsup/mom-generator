@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
     "formidable": "^3.5.1",
     "next": "^14.2.3",
     "openai": "^4.47.1",
