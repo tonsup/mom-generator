@@ -2,12 +2,12 @@ import { useState, useCallback, useRef } from 'react';
 import Head from 'next/head';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { upload } from '@vercel/blob/client';
+import { compressAudioForWhisper } from '../lib/compressAudio';
 
 const SUPPORTED_TYPES = '.m4a,.mp3,.mp4,.wav,.webm,.mpeg,.mpga';
 
 const STEPS = [
-  { id: 1, th: 'อัปโหลดไฟล์เสียง', en: 'Uploading audio file' },
+  { id: 1, th: 'บีบอัดเสียง (16 kHz mono)', en: 'Compressing audio (16 kHz mono)' },
   { id: 2, th: 'ถอดเสียงเป็นข้อความ (Whisper AI)', en: 'Transcribing audio (Whisper AI)' },
   { id: 3, th: 'สร้างสรุป MOM (GPT-4o)', en: 'Generating MOM summary (GPT-4o)' },
 ];
@@ -65,56 +65,37 @@ export default function Home() {
     setUploadPercent(0);
 
     try {
-      console.log('[client] starting upload:', file.name, file.size, 'bytes, type:', file.type);
-      const uploadStart = Date.now();
+      console.log('[client] starting:', file.name, file.size, 'bytes, type:', file.type);
+      const startTime = Date.now();
 
-      // Progress watchdog — if no progress for 30 seconds, something is wrong
-      let lastProgressTime = Date.now();
-      const watchdog = setInterval(() => {
-        const stalledSec = Math.round((Date.now() - lastProgressTime) / 1000);
-        if (stalledSec >= 30) {
-          console.warn('[client] no upload progress for', stalledSec, 'seconds');
-        }
-      }, 5000);
+      // Step 1 — Compress audio in the browser so the upload fits the 4.5 MB API limit
+      const compressedBlob = await compressAudioForWhisper(file, (percent, label) => {
+        setUploadPercent(percent);
+        console.log(`[client] compress: ${percent}% — ${label}`);
+      });
 
-      let blob;
-      try {
-        // Hard timeout: if upload doesn't finish within 3 minutes, abort and surface an error
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error('Upload timed out after 3 minutes. Check browser Network tab — the upload may be blocked or retrying silently.')),
-            3 * 60 * 1000,
-          ),
+      const compressedMB = (compressedBlob.size / 1024 / 1024).toFixed(2);
+      const originalMB = (file.size / 1024 / 1024).toFixed(2);
+      console.log(`[client] compressed: ${originalMB} MB → ${compressedMB} MB`);
+
+      if (compressedBlob.size > 4.4 * 1024 * 1024) {
+        throw new Error(
+          `ไฟล์ใหญ่เกินไปแม้หลังบีบอัด (${compressedMB} MB). การประชุมควรสั้นกว่า ~45 นาที / ` +
+          `Compressed file still too large (${compressedMB} MB). Meeting should be under ~45 min.`
         );
-
-        // Upload directly from browser to Vercel Blob.
-        // Uses the handleUpload webhook flow, which requires the deployment to be
-        // publicly accessible (no Deployment Protection, or use the Production URL).
-        const uploadPromise = upload(file.name, file, {
-          access: 'public',
-          handleUploadUrl: '/api/upload',
-          onUploadProgress: (evt) => {
-            lastProgressTime = Date.now();
-            if (evt.percentage != null) {
-              setUploadPercent(Math.round(evt.percentage));
-              console.log('[client] upload progress:', Math.round(evt.percentage) + '%');
-            }
-          },
-        });
-
-        blob = await Promise.race([uploadPromise, timeoutPromise]);
-      } finally {
-        clearInterval(watchdog);
       }
 
-      console.log('[client] upload completed in', Math.round((Date.now() - uploadStart) / 1000), 'sec →', blob.url);
       setCurrentStep(2);
+      setUploadPercent(0);
 
-      // Step 2 & 3 — server fetches blob, transcribes, summarizes
+      // Step 2 & 3 — send compressed WAV directly to API (no Blob storage needed)
+      const formData = new FormData();
+      formData.append('audio', compressedBlob, 'audio.wav');
+      formData.append('originalFilename', file.name);
+
       const response = await fetch('/api/process-audio', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ blobUrl: blob.url, filename: file.name }),
+        body: formData,
       });
 
       setCurrentStep(3);
@@ -125,8 +106,10 @@ export default function Home() {
         throw new Error(data.error || 'การประมวลผลล้มเหลว / Processing failed');
       }
 
+      console.log(`[client] all done in ${Math.round((Date.now() - startTime) / 1000)}s`);
       setResult(data);
     } catch (err) {
+      console.error('[client] error:', err);
       setError(err.message);
     } finally {
       setProcessing(false);

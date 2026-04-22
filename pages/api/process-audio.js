@@ -1,49 +1,61 @@
 import OpenAI from 'openai';
-import { del } from '@vercel/blob';
-import { toFile } from 'openai/uploads';
+import formidable from 'formidable';
+import fs from 'fs';
 
 export const config = {
   api: {
-    bodyParser: {
-      sizeLimit: '1mb',
-    },
+    bodyParser: false,
+    responseLimit: '5mb',
   },
   maxDuration: 60,
 };
 
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 function buildPrompt(isThai, transcript) {
   if (isThai) {
-    return {
-      system:
-        'คุณเป็นผู้เชี่ยวชาญในการสรุปการประชุม (Minutes of Meeting) ' +
-        'ตอบเป็นภาษาไทย ใช้ Markdown formatting ให้โครงสร้างชัดเจนและอ่านง่าย',
-      user:
-        `สรุป MOM จากบทสนทนาต่อไปนี้ โดยแบ่งเป็นหัวข้อดังนี้:\n\n` +
-        `## หัวข้อการประชุม\n` +
-        `## สรุปภาพรวม\n` +
-        `## ประเด็นที่หารือหลัก\n` +
-        `## มติที่ประชุม\n` +
-        `## งานที่ต้องดำเนินการ _(ระบุผู้รับผิดชอบและกำหนดเวลาถ้ามี)_\n` +
-        `## ขั้นตอนต่อไป / การประชุมครั้งต่อไป\n\n` +
-        `ถ้าหัวข้อใดไม่มีข้อมูลให้เขียนว่า "ไม่มีข้อมูล"\n\n` +
-        `**บทสนทนา:**\n${transcript}`,
-    };
+    return `คุณเป็นผู้ช่วยมืออาชีพสำหรับการสรุปบันทึกการประชุม (Minutes of Meeting)
+โปรดอ่าน transcript ด้านล่าง แล้วสรุปออกมาเป็นรูปแบบ MOM ที่มีหัวข้อต่อไปนี้อย่างครบถ้วน:
+
+# หัวข้อการประชุม
+# สรุปภาพรวม
+# ประเด็นที่หารือหลัก
+# มติที่ประชุม
+# งานที่ต้องดำเนินการ (ใครทำ / ภายในเมื่อใด)
+# ขั้นตอนต่อไป
+
+ใช้ภาษาไทยที่เป็นทางการ ชัดเจน กระชับ ใช้ bullet points เมื่อเหมาะสม
+
+Transcript:
+${transcript}`;
   }
-  return {
-    system:
-      'You are an expert at creating structured Minutes of Meeting (MOM). ' +
-      'Respond in English using clean Markdown formatting.',
-    user:
-      `Create a structured MOM from the transcript below, using these sections:\n\n` +
-      `## Meeting Title\n` +
-      `## Overview\n` +
-      `## Key Discussion Points\n` +
-      `## Decisions Made\n` +
-      `## Action Items _(with owners and deadlines if mentioned)_\n` +
-      `## Next Steps / Next Meeting\n\n` +
-      `If a section has no data, write "None mentioned."\n\n` +
-      `**Transcript:**\n${transcript}`,
-  };
+  return `You are a professional minute-taker. Read the transcript below and produce a clear
+Minutes of Meeting (MOM) document with these sections:
+
+# Meeting Title
+# Overview
+# Key Discussion Points
+# Decisions Made
+# Action Items (Owner / Due Date)
+# Next Steps
+
+Use clear professional English with bullet points where appropriate.
+
+Transcript:
+${transcript}`;
+}
+
+function parseForm(req) {
+  return new Promise((resolve, reject) => {
+    const form = formidable({
+      maxFileSize: 10 * 1024 * 1024, // 10 MB — compressed WAV should be well under this
+      keepExtensions: true,
+    });
+    form.parse(req, (err, fields, files) => {
+      if (err) reject(err);
+      else resolve({ fields, files });
+    });
+  });
 }
 
 export default async function handler(req, res) {
@@ -51,80 +63,69 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: 'OpenAI API key is not configured on the server.' });
-  }
-
-  const { blobUrl, filename } = req.body ?? {};
-
-  if (!blobUrl) {
-    return res.status(400).json({ error: 'Missing blobUrl in request body.' });
-  }
-
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  let tempPath = null;
 
   try {
-    // ── Step 1: Fetch audio from Vercel Blob ───────────────────────────────
-    const audioResponse = await fetch(blobUrl);
-    if (!audioResponse.ok) {
-      throw new Error(`Failed to fetch uploaded audio (HTTP ${audioResponse.status})`);
-    }
-    const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+    console.log('[process-audio] parsing multipart form');
+    const { fields, files } = await parseForm(req);
 
-    // ── Step 2: Transcribe with Whisper ────────────────────────────────────
-    const file = await toFile(audioBuffer, filename ?? 'audio.m4a');
-    const transcriptionResponse = await openai.audio.transcriptions.create({
-      file,
+    const audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
+    if (!audioFile) {
+      return res.status(400).json({ error: 'No audio file uploaded' });
+    }
+    tempPath = audioFile.filepath;
+    const originalFilename = Array.isArray(fields.originalFilename)
+      ? fields.originalFilename[0]
+      : fields.originalFilename || 'audio.wav';
+
+    console.log('[process-audio] received', audioFile.size, 'bytes for', originalFilename);
+
+    // Whisper — transcribe with language detection
+    console.log('[process-audio] calling Whisper');
+    const transcription = await client.audio.transcriptions.create({
+      file: fs.createReadStream(tempPath),
       model: 'whisper-1',
       response_format: 'verbose_json',
     });
 
-    const transcript = transcriptionResponse.text?.trim();
-    const detectedLanguage = transcriptionResponse.language ?? 'en';
-
+    const transcript = transcription.text?.trim();
+    const language = transcription.language || 'unknown';
     if (!transcript) {
-      return res.status(422).json({
-        error: 'ไม่สามารถถอดเสียงได้ / Could not extract speech from the audio file.',
-      });
+      return res.status(400).json({ error: 'ไม่พบคำพูดในไฟล์เสียง / No speech detected' });
     }
 
-    // ── Step 3: Generate MOM with GPT-4o ───────────────────────────────────
-    const isThai = detectedLanguage === 'th' || detectedLanguage === 'thai';
-    const { system, user } = buildPrompt(isThai, transcript);
+    console.log('[process-audio] transcript language:', language, '-', transcript.length, 'chars');
 
-    const momResponse = await openai.chat.completions.create({
+    const isThai = language?.toLowerCase().startsWith('th') || /[\u0E00-\u0E7F]/.test(transcript);
+
+    // GPT-4o — generate MOM
+    console.log('[process-audio] calling GPT-4o');
+    const completion = await client.chat.completions.create({
       model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
       temperature: 0.2,
+      messages: [
+        { role: 'system', content: isThai ? 'คุณเป็นเลขาที่เชี่ยวชาญการสรุปการประชุม' : 'You are an expert meeting minute-taker.' },
+        { role: 'user', content: buildPrompt(isThai, transcript) },
+      ],
     });
 
-    const momText = momResponse.choices[0]?.message?.content ?? '';
+    const mom = completion.choices[0]?.message?.content?.trim();
+    if (!mom) {
+      return res.status(500).json({ error: 'Failed to generate MOM summary' });
+    }
 
     return res.status(200).json({
+      mom,
       transcript,
-      language: isThai ? 'th' : 'en',
-      mom: momText,
+      language: isThai ? 'th' : language,
+      originalFilename,
     });
   } catch (err) {
     console.error('[process-audio] error:', err);
-
-    if (err.status === 401) {
-      return res.status(500).json({ error: 'OpenAI API key ไม่ถูกต้อง / Invalid OpenAI API key.' });
-    }
-    if (err.status === 429) {
-      return res.status(429).json({ error: 'OpenAI rate limit exceeded. Please try again in a moment.' });
-    }
-
-    return res.status(500).json({ error: err.message ?? 'Internal server error' });
+    return res.status(500).json({ error: err.message || 'Processing failed' });
   } finally {
-    // Clean up the blob after processing
-    try {
-      await del(blobUrl);
-    } catch {
-      // ignore cleanup errors
+    if (tempPath) {
+      fs.promises.unlink(tempPath).catch(() => {});
     }
   }
 }
